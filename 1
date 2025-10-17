@@ -1,0 +1,105 @@
+For some context, these are the tables I will be working with:
+OfferCase
+CaseId	INT (PK)	
+CarId	INT (FK)	
+ZipCode	Varchar(10)	
+
+Car	
+CarId	INT (PK)	
+Year	INT	
+MakeId	INT (FK)	
+ModelId	INT (FK)	
+SubmodelId	INT (FK)	N
+
+Model	
+ModelId	INT (PK)	
+MakeId	INT (FK)	
+Name	VARCHAR (50)	
+
+Make	
+MakeId	INT (PK)	
+ModelId	INT (FK)	
+Name	VARCHAR (50)	
+
+Submodel	
+SubmodelId	INT (PK)	
+ModelId	INT (FK)	
+Name	VARCHAR(50)	
+
+CaseQuote	
+CaseQuoteId	INT (PK)	
+CaseId	INT (FK)	
+BuyerId	INT (FK)	
+Amount	DECIMAL	
+Name	VARCHAR (50)	
+
+Buyer	
+BuyerId	INT (PK)	
+Name	VARCHAR (100)	
+
+CaseStatusHistory	
+CaseStatusHistoryId	INT (PK)	
+CaseId	INT (FK)	
+CaseStatusId	INT (FK)	
+PickedUpDate	DATETIME	
+IsCurrent	BIT	
+
+CaseStatus	
+CaseStatusId	INT (PK)	
+Name	VARCHAR (100)	
+
+
+SQL query for car info + buyer info + offer status:
+SELECT
+ 	oc.OfferCaseId,
+ 	cr.Year AS CarYear,
+ 	mk.Namee AS Make,
+ 	md.Name AS Model,
+ 	sm.Name AS Submodel,
+ 	oc.ZipCode,
+ 	bu.Name AS CurrentBuyer,
+ 	cq.Amount AS CurrentQuoteAmount,
+cs.Name AS CurrentStatus,
+ 	csh.StatusDate AS CurrentStatusDate
+FROM OfferCase oc
+JOIN Car cr ON cr.CarId = oc.CarId
+JOIN Make mk ON Make.MakeId = cr.MakeId
+JOIN Model md ON md.ModelId = cr.ModelId
+LEFT JOIN Submodel sm ON sm.SubmodelId = cr.SubmodelId
+LEFT JOIN CaseQuote cq ON cq.CaseId = oc.CaseId AND cq.IsCurrent = 1
+LEFT JOIN Buyer bu ON bu.BuyerId = cq.BuyerId
+LEFT JOIN CaseStatusHistory csh ON csh.CaseId = oc.CaseId AND csh.IsCurrent = 1
+LEFT JOIN CaseStatus cs ON cs.CaseStatusId = csh.CaseStatusId;
+
+Entity Framework:
+var result = context.OfferCase
+ .Select(oc => new {
+ oc.CaseId,
+ CarYear = oc.Car.Year,
+ Make = oc.Car.Make.Name,
+ Model = oc.Car.Model.Name,
+ Submodel = oc.Car.Submodel != null ? oc.Car.Submodel.Name : null,
+ oc.ZipCode,
+ CurrentQuote = oc.CaseQuotes
+ .Where(q => q.IsCurrent)
+ .Select(q => new { BuyerName = q.Buyer.Name, q.Amount })
+ .FirstOrDefault(),
+ CurrentStatus = oc.CaseStatusHistories
+ .Where(h => h.IsCurrent)
+ .Select(h => new { StatusName = h.CaseStatus.Name, h.StatusDate
+})
+ .FirstOrDefault()
+ })
+ .Select(x => new {
+ x.CaseId,
+ x.CarYear,
+ x.Make,
+ x.Model,
+ x.Submodel,
+ x.ZipCode,
+ CurrentBuyer = x.CurrentQuote != null ? x.CurrentQuote.BuyerName :
+null,
+ CurrentQuoteAmount = x.CurrentQuote?.Amount,
+ CurrentStatus = x.CurrentStatus?.StatusName,
+ CurrentStatusDate = x.CurrentStatus?.StatusDate
+ });
