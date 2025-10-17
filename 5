@@ -1,0 +1,193 @@
+For this last point I used Roslyn and xUnit, the code: 
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+public static class CodeRefactorer
+{
+	 public static async Task ProcessFolderAsync(string rootPath)
+	 {
+		 if (string.IsNullOrWhiteSpace(rootPath) || !Directory.Exists(rootPath))
+		 throw new DirectoryNotFoundException(rootPath);
+		 var csFiles = Directory.GetFiles(rootPath, "*.cs", SearchOption.AllDirectories);
+		 foreach (var file in csFiles)
+		 {
+			 var original = await File.ReadAllTextAsync(file);
+			 var tree = CSharpSyntaxTree.ParseText(original);
+			 var root = await tree.GetRootAsync().ConfigureAwait(false);
+			 var rewriter = new RenameRewriter();
+			 var updatedRoot = (CompilationUnitSyntax)rewriter.Visit(root);
+			 var spacingFixer = new MethodSpacingRewriter();
+			 updatedRoot = (CompilationUnitSyntax)spacingFixer.Visit(updatedRoot);
+			 var finalText = updatedRoot.NormalizeWhitespace().ToFullString();
+			 if (!string.Equals(finalText, original, StringComparison.Ordinal))
+			 {
+				await File.WriteAllTextAsync(file, finalText);
+			 }
+		 }
+	 }
+ private sealed class RenameRewriter : CSharpSyntaxRewriter
+ {
+	 public override SyntaxNode VisitMethodDeclaration(MethodDeclarationSyntax node)
+	 {
+		var updated = (MethodDeclarationSyntax)base.VisitMethodDeclaration(node);
+		bool isAsync = updated.Modifiers.Any(m => m.IsKind(SyntaxKind.AsyncKeyword));
+		bool isOverride = updated.Modifiers.Any(m => m.IsKind(SyntaxKind.OverrideKeyword));
+		bool isExplicitInterface = updated.ExplicitInterfaceSpecifier != null;
+		if (isAsync && !isOverride && !isExplicitInterface)
+		{
+			var name = updated.Identifier.ValueText;
+			if (!name.EndsWith("Async", StringComparison.Ordinal))
+			{
+				var newId = SyntaxFactory.Identifier(updated.Identifier.LeadingTrivia,name + "Async",updated.Identifier.TrailingTrivia);
+				updated = updated.WithIdentifier(newId);
+			}
+		}
+		return updated;
+	 }
+	 public override SyntaxToken VisitToken(SyntaxToken token)
+	 {
+		 if (token.IsKind(SyntaxKind.IdentifierToken))
+		 {
+			 var text = token.ValueText;
+			 string ReplaceTail(string s, string suffix, string replacement)
+			 {
+				 if (s.EndsWith(replacement, StringComparison.Ordinal)) returns;
+				 if (s.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+				 {
+					return s.Substring(0, s.Length - suffix.Length) + replacement;
+				 }
+				 return s;
+			 }
+			 var mapped = text;
+			 mapped = ReplaceTail(mapped, "Dtos", "DTOs");
+			 mapped = ReplaceTail(mapped, "Dto", "DTO");
+			 mapped = ReplaceTail(mapped, "Vms", "VMs");
+			 mapped = ReplaceTail(mapped, "Vm", "VM");
+			 if (!string.Equals(mapped, text, StringComparison.Ordinal))
+			 {
+				return SyntaxFactory.Identifier(token.LeadingTrivia, mapped, token.TrailingTrivia);
+			 }
+		 }
+		 return base.VisitToken(token);
+	 }
+ }
+ private sealed class MethodSpacingRewriter : CSharpSyntaxRewriter
+ {
+	 public override SyntaxNode VisitClassDeclaration(ClassDeclarationSyntax node)
+	 {
+		 var updated = (ClassDeclarationSyntax)base.VisitClassDeclaration(node);
+		 var members = updated.Members;
+		 var newMembers = new List<MemberDeclarationSyntax>(members.Count);
+		 bool prevWasMethod = false;
+		 foreach (var m in members)
+		 {
+			if (m is MethodDeclarationSyntax method)
+			 {
+				 var leading = method.GetLeadingTrivia();
+				 int leadingEols = 0;
+				 foreach (var t in leading)
+				 {
+					 if (t.IsKind(SyntaxKind.EndOfLineTrivia)) leadingEols++;
+					 else if (!t.IsKind(SyntaxKind.WhitespaceTrivia)) break;
+				 }
+				 if (prevWasMethod && leadingEols < 2)
+				 {
+					 var newLeading = leading.Insert(0, SyntaxFactory.EndOfLine(Environment.NewLine));
+					 method = method.WithLeadingTrivia(newLeading);
+				 }
+				 newMembers.Add(method);
+				 prevWasMethod = true;
+			 }
+			 else
+			 {
+				 newMembers.Add(m);
+				 prevWasMethod = m is ConstructorDeclarationSyntax;
+			 }
+		 }
+		 return updated.WithMembers(SyntaxFactory.List(newMembers));
+	 }
+ }
+}
+And here the Unit tests:
+using System;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using Xunit;
+public class CodeRefactorerTests
+{
+ [Fact]
+ public async Task RenombraAsyncMethods_SinAsync_SoloDefinicion()
+ {
+ var dir = NewTempDir();
+ var code = @"
+using System.Threading.Tasks;
+class C
+{
+ public async Task DoWork(){ await Task.CompletedTask; }
+ public async Task DoWorkAsync(){ await Task.CompletedTask; }
+ public override async Task OverrideMethod(){ await Task.CompletedTask; }
+}
+";
+ var path = Path.Combine(dir, "A.cs");
+ await File.WriteAllTextAsync(path, code);
+ await CodeRefactorer.ProcessFolderAsync(dir);
+ var result = await File.ReadAllTextAsync(path);
+ Assert.Contains("DoWorkAsync()", result);
+ Assert.Contains("DoWorkAsync(){", result);
+ Assert.Contains("OverrideMethod()", result);
+ }
+ [Fact]
+ public async Task NormalizaSufijos_VM_DTO_EnIdentificadores()
+ {
+ var dir = NewTempDir();
+ var code = @"
+class MyOrderDto { }
+class ListVms { }
+class SomethingVm { }
+class AlreadyDTO { }
+class AlreadyVMs { }
+";
+ var path = Path.Combine(dir, "B.cs");
+ await File.WriteAllTextAsync(path, code);
+ await CodeRefactorer.ProcessFolderAsync(dir);
+ var result = await File.ReadAllTextAsync(path);
+ Assert.Contains("class MyOrderDTO", result);
+ Assert.Contains("class ListVMs", result);
+ Assert.Contains("class SomethingVM", result);
+ Assert.Contains("class AlreadyDTO", result);
+ Assert.Contains("class AlreadyVMs", result);
+ }
+ [Fact]
+ public async Task InsertaLineaEnBlanco_EntreMetodos_Consecutivos()
+ {
+ var dir = NewTempDir();
+ var code = @"
+class C
+{
+ void M1() { }
+ void M2() { }
+ int P { get; set; }
+ void M3() { }
+}
+";
+ var path = Path.Combine(dir, "C.cs");
+ await File.WriteAllTextAsync(path, code);
+ await CodeRefactorer.ProcessFolderAsync(dir);
+ var result = await File.ReadAllTextAsync(path);
+ 
+ var between = result.Split(new[] { "void M1() { }" }, StringSplitOptions.None)[1];
+ Assert.Contains(Environment.NewLine + Environment.NewLine + " void M2()", between);
+ }
+ private static string NewTempDir()
+ {
+ var dir = Path.Combine(Path.GetTempPath(), "refactor_" + Guid.NewGuid());
+ Directory.CreateDirectory(dir);
+ return dir;
+ }
+}
