@@ -1,0 +1,24 @@
+Saving inside the foreach causes X transactions, which causes performance issues, so we send it outside.
+I use GroupBy to group customers outside the foreach to avoid calling the same customer repeatedly.
+I also add exceptions for error handling.
+This is what my fixed code looks like:
+public void UpdateCustomersBalanceByInvoices(List<Invoice> invoices)
+{
+	if (invoices == null) throw new ArgumentNullException(nameof(invoices));
+	var valid = invoices.Where(i => i?.CustomerId != null).ToList();
+	if (valid.Count == 0) return;
+	var totalsByCustomer = valid
+	.GroupBy(i => i.CustomerId!.Value)
+	.ToDictionary(g => g.Key, g => g.Sum(i => i.Total ?? 0m));
+	var customerIds = totalsByCustomer.Keys.ToList();
+	var customers = dbContext.Customers
+	.Where(c => customerIds.Contains(c.Id))
+	.ToDictionary(c => c.Id);
+	foreach (var kvp in totalsByCustomer)
+	{
+		if (!customers.TryGetValue(kvp.Key, out var customer))
+		continue;
+		customer.Balance -= kvp.Value;
+	}
+ dbContext.SaveChanges();
+}
